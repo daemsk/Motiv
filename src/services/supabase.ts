@@ -1,6 +1,6 @@
 import 'react-native-url-polyfill/auto';
 import { createClient } from '@supabase/supabase-js';
-import { Profile, Goal, Habit, HabitLog } from '@/types';
+import { Profile, Goal, Habit, HabitLog } from '../types';
 
 // Get environment variables
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
@@ -59,42 +59,75 @@ export interface Database {
 
 /**
  * Get the current authenticated user's profile
+ * @param userId - Optional user ID. If not provided, will fetch from auth session
  */
-export async function getCurrentUserProfile(): Promise<Profile | null> {
-  const { data: { user } } = await supabase.auth.getUser();
+export async function getCurrentUserProfile(userId?: string): Promise<Profile | null> {
+  try {
+    console.log('[getCurrentUserProfile] Starting...', userId ? `with userId: ${userId}` : 'fetching userId');
 
-  if (!user) return null;
+    // Wait for auth session to be fully available in Supabase client
+    // This is necessary because RLS policies check auth.uid() which needs the session to be set
+    console.log('[getCurrentUserProfile] Waiting for auth session to be available...');
+    const { data: { session } } = await supabase.auth.getSession();
+    console.log('[getCurrentUserProfile] Session check:', session ? 'Has session' : 'No session');
 
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', user.id)
-    .single();
+    if (!session) {
+      console.log('[getCurrentUserProfile] No session available, cannot query with RLS');
+      return null;
+    }
 
-  if (error) {
-    console.error('Error fetching user profile:', error);
+    let id = userId || session.user.id;
+    console.log('[getCurrentUserProfile] Using user ID:', id);
+
+    console.log('[getCurrentUserProfile] Querying profiles table for user:', id);
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    console.log('[getCurrentUserProfile] Query completed');
+
+    if (error) {
+      console.error('[getCurrentUserProfile] Error fetching user profile:', error);
+      console.error('[getCurrentUserProfile] Error details:', JSON.stringify(error));
+      return null;
+    }
+
+    console.log('[getCurrentUserProfile] Profile query result:', data ? 'Found profile' : 'No profile in DB');
+    console.log('[getCurrentUserProfile] Data:', data);
+    return data;
+  } catch (error) {
+    console.error('[getCurrentUserProfile] Exception:', error);
     return null;
   }
-
-  return data;
 }
 
 /**
  * Create a new user profile (called after signup)
  */
 export async function createProfile(userId: string, email?: string): Promise<Profile | null> {
-  const { data, error } = await supabase
-    .from('profiles')
-    .insert({ id: userId, email })
-    .select()
-    .single();
+  try {
+    console.log('Creating profile for:', userId, email);
+    
+    const { data, error } = await supabase
+      .from('profiles')
+      .insert({ id: userId, email })
+      .select()
+      .single();
 
-  if (error) {
-    console.error('Error creating profile:', error);
+    if (error) {
+      console.error('Error creating profile:', error);
+      return null;
+    }
+
+    console.log('Profile created successfully:', data);
+    return data;
+  } catch (error) {
+    console.error('Exception in createProfile:', error);
     return null;
   }
-
-  return data;
 }
 
 /**

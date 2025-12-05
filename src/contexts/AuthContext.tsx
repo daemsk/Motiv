@@ -1,7 +1,9 @@
 import React, { createContext, useState, useEffect, useContext } from 'react';
-import { Session, User } from '@supabase/supabase-js';
-import { supabase, getCurrentUserProfile, createProfile } from '@/services/supabase';
-import { AuthContextType, Profile } from '@/types';
+import { Session } from '@supabase/supabase-js';
+import * as Linking from 'expo-linking';
+import { Platform } from 'react-native';
+import { supabase, getCurrentUserProfile, createProfile } from '../services/supabase';
+import { AuthContextType, Profile } from '../types';
 
 // Create the Auth Context
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -14,24 +16,69 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Initialize auth state on mount
   useEffect(() => {
-    // Get initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      if (session?.user) {
-        loadUserProfile(session.user.id);
-      } else {
-        setLoading(false);
+    const initAuth = async () => {
+      // Check for auth tokens in URL (for web/Expo Go magic link callback)
+      if (Platform.OS === 'web') {
+        const hashParams = new URLSearchParams(window.location.hash.substring(1));
+        const access_token = hashParams.get('access_token');
+        const refresh_token = hashParams.get('refresh_token');
+
+        if (access_token && refresh_token) {
+          console.log('Found tokens in URL, setting session...');
+          const { error } = await supabase.auth.setSession({
+            access_token,
+            refresh_token,
+          });
+
+          if (error) {
+            console.error('Error setting session:', error);
+          } else {
+            console.log('Session set from URL tokens');
+            // Clear hash from URL
+            window.history.replaceState({}, document.title, window.location.pathname);
+            // Don't proceed - let onAuthStateChange handle it
+            return;
+          }
+        }
       }
-    });
+
+      // Get initial session
+      const { data: { session } } = await supabase.auth.getSession();
+      console.log('Initial session:', session?.user?.email || 'No session');
+
+      if (session?.user) {
+        // Create a minimal profile from session data
+        const profileFromSession: Profile = {
+          id: session.user.id,
+          email: session.user.email || null,
+          name: session.user.user_metadata?.name || null,
+          created_at: session.user.created_at || new Date().toISOString(),
+        };
+        setUser(profileFromSession);
+        setSession(session);
+      }
+      setLoading(false);
+    };
+
+    initAuth();
 
     // Listen for auth state changes
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      console.log('Auth state changed:', _event, session?.user?.email || 'No user');
       setSession(session);
 
       if (session?.user) {
-        await loadUserProfile(session.user.id);
+        // Create profile from session immediately - no async delays
+        const profileFromSession: Profile = {
+          id: session.user.id,
+          email: session.user.email || null,
+          name: session.user.user_metadata?.name || null,
+          created_at: session.user.created_at || new Date().toISOString(),
+        };
+        setUser(profileFromSession);
+        setLoading(false);
       } else {
         setUser(null);
         setLoading(false);
@@ -44,45 +91,78 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, []);
 
-  // Load user profile from database
-  const loadUserProfile = async (userId: string) => {
-    try {
-      const profile = await getCurrentUserProfile();
+  // Handle deep links for magic link authentication (mobile)
+  useEffect(() => {
+    if (Platform.OS === 'web') return; // Skip deep linking on web
 
-      // If profile doesn't exist, create it
-      if (!profile) {
-        const { data: { user: authUser } } = await supabase.auth.getUser();
-        if (authUser) {
-          const newProfile = await createProfile(authUser.id, authUser.email);
-          setUser(newProfile);
+    const handleDeepLink = async (event: { url: string }) => {
+      console.log('Deep link received:', event.url);
+      
+      if (event.url.includes('access_token')) {
+        try {
+          const hashPart = event.url.split('#')[1] || '';
+          const params = new URLSearchParams(hashPart);
+          
+          const access_token = params.get('access_token');
+          const refresh_token = params.get('refresh_token');
+
+          console.log('Extracted tokens:', { 
+            has_access: !!access_token, 
+            has_refresh: !!refresh_token 
+          });
+
+          if (access_token && refresh_token) {
+            const { error } = await supabase.auth.setSession({
+              access_token,
+              refresh_token,
+            });
+
+            if (error) {
+              console.error('Error setting session:', error);
+            } else {
+              console.log('Session set successfully');
+            }
+          }
+        } catch (error) {
+          console.error('Error parsing deep link:', error);
         }
-      } else {
-        setUser(profile);
       }
-    } catch (error) {
-      console.error('Error loading user profile:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+    };
+
+    const subscription = Linking.addEventListener('url', handleDeepLink);
+
+    Linking.getInitialURL().then((url) => {
+      if (url) {
+        console.log('Initial URL:', url);
+        handleDeepLink({ url });
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, []);
 
   // Sign in with magic link
   const signIn = async (email: string): Promise<void> => {
     setLoading(true);
     try {
+      const redirectUrl = Platform.OS === 'web' 
+        ? window.location.origin 
+        : Linking.createURL('/');
+      
+      console.log('Sending magic link with redirect:', redirectUrl);
+
       const { error } = await supabase.auth.signInWithOtp({
         email,
         options: {
-          emailRedirectTo: undefined, // For mobile, we don't need a redirect URL
+          emailRedirectTo: redirectUrl,
         },
       });
 
       if (error) {
         throw error;
       }
-
-      // Magic link sent successfully
-      // User will be authenticated when they click the link
     } catch (error) {
       console.error('Sign in error:', error);
       throw error;
@@ -93,20 +173,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Sign out
   const signOut = async (): Promise<void> => {
+    console.log('[AuthContext] signOut() called');
     setLoading(true);
     try {
+      console.log('[AuthContext] Calling supabase.auth.signOut()');
       const { error } = await supabase.auth.signOut();
 
       if (error) {
+        console.error('[AuthContext] Supabase signOut error:', error);
         throw error;
       }
 
+      console.log('[AuthContext] Supabase signOut successful, clearing local state');
       setUser(null);
       setSession(null);
+      console.log('[AuthContext] Local state cleared');
     } catch (error) {
-      console.error('Sign out error:', error);
+      console.error('[AuthContext] Sign out error:', error);
       throw error;
     } finally {
+      console.log('[AuthContext] signOut() complete, setting loading=false');
       setLoading(false);
     }
   };
@@ -118,6 +204,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     signIn,
     signOut,
   };
+
+  console.log('AuthContext state:', { user: user?.email || 'No user', loading });
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };

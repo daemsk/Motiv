@@ -1,2 +1,3 @@
 // Export navigation components
-// Example: export { AppNavigator } from './AppNavigator';
+export { AppNavigator } from './AppNavigator';
+export type { RootStackParamList, MainTabParamList, GoalsStackParamList } from './AppNavigator';
